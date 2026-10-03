@@ -4,12 +4,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
 from flask import Flask
+
 app = Flask(__name__)
+
+# --- TELEGRAM CONFIG ---
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+def send_csv_to_telegram():
+    if not BOT_TOKEN or not CHAT_ID:
+        return
+    if not SAVE_PATH.exists():
+        return
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+        with open(SAVE_PATH, 'rb') as f:
+            r = requests.post(url, data={"chat_id": CHAT_ID, "caption": f"CSV {datetime.now().strftime('%H:%M')} UTC - {len(SAVED)} matchs"}, files={"document": f}, timeout=30)
+        print(f"[TG] CSV envoyé: {r.status_code}", flush=True)
+    except Exception as e:
+        print(f"[TG] Erreur envoi: {e}", flush=True)
+
 @app.route("/")
 def home(): return f"bot live - tracked: {len(TRACKED)} | saved: {len(SAVED)} | dom: {DOMAIN} - {now_str()} UTC"
 def run_web():
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
+
 MIGRATION_DOMAINS = ["1xbet.cm","1xbet.ci","1xbet.sn","1xbet.cd","1x-bet.cm"]
 GAME_URL_TMPL = "https://{dom}/service-api/LiveFeed/GetGameZip?id={gid}&lng=fr&cfview=0&isSubGames=true&GroupEvents=true&countevents=1000&grMode=4"
 FAIL_STREAK_LIMIT = 15
@@ -34,6 +54,7 @@ def fetch_by_id_persistent(session, gid, headers_base):
             return {"id": str(v.get("I", gid)), "type": (v.get("LE","") or "").strip(), "team1": v.get("O1",""), "team2": v.get("O2",""), "sec": sec, "score1": s1, "score2": s2, "total": s1+s2, "c1": 1.5, "cX": 1.5, "c2": 1.5}
         except: continue
     return None
+
 DOMAIN = "1xbet.cm"
 BASE = f"https://{DOMAIN}"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36","Accept": "application/json","Accept-Language": "fr-FR,fr;q=0.9","Accept-Encoding": "gzip, deflate","Referer": f"{BASE}/fr/live/","Origin": BASE}
@@ -128,6 +149,7 @@ def flush_to_csv():
         w=csv.writer(f); w.writerow(["date_utc","type","match","total_2m10","total_5m00","score"])
         for rec in sorted(SAVED,key=lambda x:x["date"]): w.writerow([rec["date"],rec["type_short"],rec["match_str"],rec["t130"] if rec["t130"] is not None else "",rec["t300"] if rec["t300"] is not None else "",rec["last_score_str"]])
     tmp.replace(SAVE_PATH)
+    Thread(target=send_csv_to_telegram, daemon=True).start()
 def update_tracking(matches):
     now_ids=set(); changed=False
     for m in matches:
@@ -169,7 +191,7 @@ def main():
     session=requests.Session()
     load_existing_csv()
     last_error=None
-    print(f"Demarrage... Fichier -> {SAVE_PATH} | {len(SAVED)} deja sauves | FILTRE actif: ignore si >2m10",flush=True)
+    print(f"Demarrage... Fichier -> {SAVE_PATH} | {len(SAVED)} deja sauves | TG={'ON' if BOT_TOKEN else 'OFF'}",flush=True)
     while True:
         t0=time.monotonic()
         try: matches,total=fetch_live_matches(session); update_tracking(matches); last_error=None
