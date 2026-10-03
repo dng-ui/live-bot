@@ -2,13 +2,19 @@
 import requests, json, gzip, zlib, time, os, sys, shutil, csv
 from datetime import datetime, timezone
 from pathlib import Path
-
+from threading import Thread
+from flask import Flask
+app = Flask(__name__)
+@app.route("/")
+def home(): return f"bot live - tracked: {len(TRACKED)} | saved: {len(SAVED)} | dom: {DOMAIN} - {now_str()} UTC"
+def run_web():
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
 MIGRATION_DOMAINS = ["1xbet.cm","1xbet.ci","1xbet.sn","1xbet.cd","1x-bet.cm"]
 GAME_URL_TMPL = "https://{dom}/service-api/LiveFeed/GetGameZip?id={gid}&lng=fr&cfview=0&isSubGames=true&GroupEvents=true&countevents=1000&grMode=4"
 FAIL_STREAK_LIMIT = 15
 current_domain_idx = 0
 fail_streak = 0
-
 def fetch_by_id_persistent(session, gid, headers_base):
     for dom in MIGRATION_DOMAINS:
         try:
@@ -22,14 +28,12 @@ def fetch_by_id_persistent(session, gid, headers_base):
             if not v: continue
             sc = v.get("SC",{}) or {}
             sec = int(sc.get("TS",0) or 0)
-            if sec > 130:
-                continue
+            if sec > 130: continue
             s1 = int(sc.get("FS",{}).get("S1",0) or 0)
             s2 = int(sc.get("FS",{}).get("S2",0) or 0)
             return {"id": str(v.get("I", gid)), "type": (v.get("LE","") or "").strip(), "team1": v.get("O1",""), "team2": v.get("O2",""), "sec": sec, "score1": s1, "score2": s2, "total": s1+s2, "c1": 1.5, "cX": 1.5, "c2": 1.5}
         except: continue
     return None
-
 DOMAIN = "1xbet.cm"
 BASE = f"https://{DOMAIN}"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36","Accept": "application/json","Accept-Language": "fr-FR,fr;q=0.9","Accept-Encoding": "gzip, deflate","Referer": f"{BASE}/fr/live/","Origin": BASE}
@@ -43,10 +47,8 @@ SAVE_PATH = Path(os.environ.get("SAVE_PATH", "./data/short_football_totals.csv")
 SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
 IS_TTY = sys.stdout.isatty()
 TRACKED, SAVED = {}, []
-
 def now_str(): return datetime.now(timezone.utc).strftime("%H:%M:%S")
 def fmt_mmss(sec): return f"{int(sec)//60:02d}:{int(sec)%60:02d}"
-
 def decode(r):
     try: return r.json()
     except:
@@ -54,14 +56,12 @@ def decode(r):
         except:
             try: return json.loads(zlib.decompress(r.content, 16+zlib.MAX_WBITS).decode())
             except: return {}
-
 def parse_score(sc):
     try: s1 = int(sc.get("FS",{}).get("S1",0) or 0)
     except: s1=0
     try: s2 = int(sc.get("FS",{}).get("S2",0) or 0)
     except: s2=0
     return s1,s2
-
 def extract_odds(ev):
     c1=cX=c2=None
     for m in ev.get("E",[]) or []:
@@ -81,7 +81,6 @@ def extract_odds(ev):
             elif t==3 and isinstance(v,(float,int)): c2=v
         if c1 and cX and c2: break
     return c1,cX,c2
-
 def fetch_live_matches(session):
     global DOMAIN,BASE,URL,current_domain_idx,fail_streak
     r = session.get(URL, headers=HEADERS, timeout=8)
@@ -116,7 +115,6 @@ def fetch_live_matches(session):
                 matches.append(rescued)
                 TRACKED[mid]["missing"]=0
     return matches,len(raw_events)
-
 def load_existing_csv():
     if not SAVE_PATH.exists(): return
     try:
@@ -124,14 +122,12 @@ def load_existing_csv():
             for row in csv.DictReader(f):
                 SAVED.append({"date":row.get("date_utc",""),"type_short":row.get("type",""),"match_str":row.get("match",""),"t130":row.get("total_2m10") or None,"t300":row.get("total_5m00") or None,"last_score_str":row.get("score",""),"last_sec":0,"last_total":0,"missing":99})
     except: pass
-
 def flush_to_csv():
     tmp=SAVE_PATH.with_suffix(SAVE_PATH.suffix+".tmp")
     with open(tmp,"w",newline="",encoding="utf-8") as f:
         w=csv.writer(f); w.writerow(["date_utc","type","match","total_2m10","total_5m00","score"])
         for rec in sorted(SAVED,key=lambda x:x["date"]): w.writerow([rec["date"],rec["type_short"],rec["match_str"],rec["t130"] if rec["t130"] is not None else "",rec["t300"] if rec["t300"] is not None else "",rec["last_score_str"]])
     tmp.replace(SAVE_PATH)
-
 def update_tracking(matches):
     now_ids=set(); changed=False
     for m in matches:
@@ -139,8 +135,7 @@ def update_tracking(matches):
         match_str=f"{m['team1']} vs {m['team2']}"
         type_short=m["type"].replace("Short Football ","")
         if mid not in TRACKED:
-            if m["sec"] > TARGET_130:
-                continue
+            if m["sec"] > TARGET_130: continue
             TRACKED[mid]={"date":datetime.now(timezone.utc).isoformat(),"type_short":type_short,"match_str":match_str,"t130":None,"t300":None,"last_total":m["total"],"last_score_str":f"{m['score1']}-{m['score2']}","last_sec":m["sec"],"missing":0}
         rec=TRACKED.get(mid)
         if not rec: continue
@@ -152,7 +147,6 @@ def update_tracking(matches):
             TRACKED[mid]["missing"]+=1
             if TRACKED[mid]["missing"]>=MISSING_LIMIT: SAVED.append(TRACKED[mid]); del TRACKED[mid]; changed=True
     if changed: flush_to_csv()
-
 def render_table(matches,total_events,last_error):
     cols=shutil.get_terminal_size((80,24)).columns
     live_list=sorted(TRACKED.values(),key=lambda x:x["date"])
@@ -170,8 +164,8 @@ def render_table(matches,total_events,last_error):
         t300=str(rec["t300"]) if rec["t300"] is not None else "-"
         lines.append(f"{rec['type_short'][:10]:<10} {m_str:<34} {t130:<5} {t300:<5} {rec['last_score_str']:<6} {fmt_mmss(rec['last_sec'])}")
     return "\n".join(lines)
-
 def main():
+    Thread(target=run_web, daemon=True).start()
     session=requests.Session()
     load_existing_csv()
     last_error=None
@@ -184,7 +178,6 @@ def main():
             os.system("cls" if os.name=="nt" else "clear")
             print(render_table(matches,total,last_error))
         time.sleep(max(0.0,POLL_INTERVAL-(time.monotonic()-t0)))
-
 if __name__=="__main__":
     try: main()
     except KeyboardInterrupt:
