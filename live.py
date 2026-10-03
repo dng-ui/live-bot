@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import requests, json, gzip, zlib, time, os, sys, shutil, base64
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +48,7 @@ def send_csv_to_telegram():
 def home(): return f"bot STRICT - tracked:{len(TRACKED)} saved:{len(SAVED)} ignores:{IGNORED_LATE}"
 def run_web():
     port = int(os.environ.get("PORT", "10000")); app.run(host="0.0.0.0", port=port)
-MIGRATION_DOMAINS = ["1xbet.cm","1xbet.ci","1xbet.sn","1xbet.cd","1x-bet.cm"]
+MIGRATION_DOMAINS = ["1xbet.com","1xbet.ci","1xbet.sn","1xbet.cd"]
 GAME_URL_TMPL = "https://{dom}/service-api/LiveFeed/GetGameZip?id={gid}&lng=fr&cfview=0&isSubGames=true&GroupEvents=true&countevents=1000&grMode=4"
 FAIL_STREAK_LIMIT = 15; current_domain_idx = 0; fail_streak = 0
 def fetch_by_id_persistent(session, gid, headers_base):
@@ -63,7 +64,7 @@ def fetch_by_id_persistent(session, gid, headers_base):
             return {"id": str(v.get("I", gid)), "type": (v.get("LE","") or "").strip(), "team1": v.get("O1",""), "team2": v.get("O2",""), "sec": sec, "score1": s1, "score2": s2, "total": s1+s2}
         except: continue
     return None
-DOMAIN = "1xbet.cm"; BASE = f"https://{DOMAIN}"
+DOMAIN = os.getenv("BASE_URL","1xbet.com").replace("https://","").replace("/",""); BASE = f"https://{DOMAIN}"
 HEADERS = {"User-Agent": "Mozilla/5.0","Accept": "application/json","Accept-Language": "fr-FR,fr;q=0.9","Accept-Encoding": "gzip, deflate","Referer": f"{BASE}/fr/live/","Origin": BASE}
 URL = f"{BASE}/service-api/LiveFeed/Get1x2_Zip?sports=1&count=1000&lng=fr&mode=4&getEmpty=true"
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "1.0"))
