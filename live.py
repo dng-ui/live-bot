@@ -1,35 +1,59 @@
 #!/usr/bin/env python3
-import requests, json, gzip, zlib, time, os, sys, shutil, csv
+import requests, json, gzip, zlib, time, os, sys, shutil, csv, base64
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
 from flask import Flask
-
 app = Flask(__name__)
-
-# --- TELEGRAM CONFIG ---
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "dng-ui/live-bot")
+GITHUB_PATH = "data/short_football_totals.csv"
+def github_headers():
+    return {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"} if GITHUB_TOKEN else {}
+def pull_from_github():
+    if not GITHUB_TOKEN or SAVE_PATH.exists(): return
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_PATH}"
+        r = requests.get(url, headers=github_headers(), timeout=10)
+        if r.status_code == 200:
+            content = base64.b64decode(r.json()["content"])
+            SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SAVE_PATH.write_bytes(content)
+            print(f"[GH] Pull OK {len(content)} bytes")
+    except Exception as e:
+        print(f"[GH] Pull fail: {e}")
+def push_to_github():
+    if not GITHUB_TOKEN: return
+    try:
+        if not SAVE_PATH.exists(): return
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_PATH}"
+        with open(SAVE_PATH, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        r = requests.get(url, headers=github_headers(), timeout=10)
+        sha = r.json().get("sha") if r.status_code == 200 else None
+        data = {"message": f"auto: {len(SAVED)} matchs {datetime.now(timezone.utc).isoformat()}", "content": b64}
+        if sha: data["sha"] = sha
+        r2 = requests.put(url, headers=github_headers(), json=data, timeout=15)
+        print(f"[GH] Push {r2.status_code}")
+    except Exception as e:
+        print(f"[GH] Push fail: {e}")
 def send_csv_to_telegram():
-    if not BOT_TOKEN or not CHAT_ID:
-        return
-    if not SAVE_PATH.exists():
-        return
+    if not BOT_TOKEN or not CHAT_ID: return
+    if not SAVE_PATH.exists(): return
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
         with open(SAVE_PATH, 'rb') as f:
             r = requests.post(url, data={"chat_id": CHAT_ID, "caption": f"CSV {datetime.now().strftime('%H:%M')} UTC - {len(SAVED)} matchs"}, files={"document": f}, timeout=30)
-        print(f"[TG] CSV envoyé: {r.status_code}", flush=True)
+        print(f"[TG] CSV envoye: {r.status_code}", flush=True)
     except Exception as e:
-        print(f"[TG] Erreur envoi: {e}", flush=True)
-
+        print(f"[TG] Erreur: {e}", flush=True)
 @app.route("/")
 def home(): return f"bot live - tracked: {len(TRACKED)} | saved: {len(SAVED)} | dom: {DOMAIN} - {now_str()} UTC"
 def run_web():
     port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
-
 MIGRATION_DOMAINS = ["1xbet.cm","1xbet.ci","1xbet.sn","1xbet.cd","1x-bet.cm"]
 GAME_URL_TMPL = "https://{dom}/service-api/LiveFeed/GetGameZip?id={gid}&lng=fr&cfview=0&isSubGames=true&GroupEvents=true&countevents=1000&grMode=4"
 FAIL_STREAK_LIMIT = 15
@@ -54,7 +78,6 @@ def fetch_by_id_persistent(session, gid, headers_base):
             return {"id": str(v.get("I", gid)), "type": (v.get("LE","") or "").strip(), "team1": v.get("O1",""), "team2": v.get("O2",""), "sec": sec, "score1": s1, "score2": s2, "total": s1+s2, "c1": 1.5, "cX": 1.5, "c2": 1.5}
         except: continue
     return None
-
 DOMAIN = "1xbet.cm"
 BASE = f"https://{DOMAIN}"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36","Accept": "application/json","Accept-Language": "fr-FR,fr;q=0.9","Accept-Encoding": "gzip, deflate","Referer": f"{BASE}/fr/live/","Origin": BASE}
@@ -62,8 +85,6 @@ URL = f"{BASE}/service-api/LiveFeed/Get1x2_Zip?sports=1&count=1000&lng=fr&mode=4
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "1.0"))
 TARGET_130, TARGET_300, MISSING_LIMIT = 130, 300, 10
 TYPE_KEYWORDS = [k.strip().lower() for k in os.environ.get("TYPE_KEYWORDS", "short,subsoccer").split(",") if k.strip()]
-DEBUG = os.environ.get("DEBUG", "0") == "1"
-DEBUG_LOG_PATH = Path(os.environ.get("DEBUG_LOG_PATH", "./debug.log"))
 SAVE_PATH = Path(os.environ.get("SAVE_PATH", "./data/short_football_totals.csv")).expanduser()
 SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
 IS_TTY = sys.stdout.isatty()
@@ -150,6 +171,7 @@ def flush_to_csv():
         for rec in sorted(SAVED,key=lambda x:x["date"]): w.writerow([rec["date"],rec["type_short"],rec["match_str"],rec["t130"] if rec["t130"] is not None else "",rec["t300"] if rec["t300"] is not None else "",rec["last_score_str"]])
     tmp.replace(SAVE_PATH)
     Thread(target=send_csv_to_telegram, daemon=True).start()
+    Thread(target=push_to_github, daemon=True).start()
 def update_tracking(matches):
     now_ids=set(); changed=False
     for m in matches:
@@ -174,10 +196,10 @@ def render_table(matches,total_events,last_error):
     live_list=sorted(TRACKED.values(),key=lambda x:x["date"])
     saved_list=sorted(SAVED,key=lambda x:x["date"])
     lines=[]
-    lines.append(f"LIVE Short Football — {now_str()} UTC — {len(matches)} live | {len(live_list)} EN SUIVI | {len(saved_list)} SAUVES | DOM={DOMAIN} FAIL={fail_streak} [FILTRE >2m10]")
+    lines.append(f"LIVE Short Football — {now_str()} UTC — {len(matches)} live | {len(live_list)} EN SUIVI | {len(saved_list)} SAUVES | DOM={DOMAIN} FAIL={fail_streak}")
     if last_error: lines.append(f"Erreur: {last_error}")
     lines.append("-"*cols)
-    lines.append(f"EN SUIVI ({len(live_list)}) - seulement 0-2m10 au depart")
+    lines.append(f"EN SUIVI ({len(live_list)})")
     lines.append(f"{'Type':<10} {'Match':<34} {'2m10':<5} {'5m00':<5} {'Score':<6} {'Temps'}")
     lines.append("-"*cols)
     for rec in live_list:
@@ -188,10 +210,11 @@ def render_table(matches,total_events,last_error):
     return "\n".join(lines)
 def main():
     Thread(target=run_web, daemon=True).start()
+    pull_from_github()
     session=requests.Session()
     load_existing_csv()
     last_error=None
-    print(f"Demarrage... Fichier -> {SAVE_PATH} | {len(SAVED)} deja sauves | TG={'ON' if BOT_TOKEN else 'OFF'}",flush=True)
+    print(f"Demarrage... Fichier -> {SAVE_PATH} | {len(SAVED)} deja sauves | TG={'ON' if BOT_TOKEN else 'OFF'} | GH={'ON' if GITHUB_TOKEN else 'OFF'}",flush=True)
     while True:
         t0=time.monotonic()
         try: matches,total=fetch_live_matches(session); update_tracking(matches); last_error=None
